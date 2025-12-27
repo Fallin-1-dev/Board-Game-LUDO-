@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 ## Foundry
 
 **Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
@@ -64,3 +65,7 @@ $ forge --help
 $ anvil --help
 $ cast --help
 ```
+=======
+# Board-Game-LUDO-
+A board game where 4 players play with two dice
+>>>>>>> f1d956deedece4d9abc54acf335c607f478676b6
