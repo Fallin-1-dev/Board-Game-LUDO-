@@ -187,6 +187,25 @@ contract Ludo {
         }
     }
 
+    // ========== INTERNAL UTILITIES ==========
+
+    function _refundPlayer(address player, uint256 amount) internal {
+        (bool success,) = player.call{value: amount}("");
+        if (!success) revert Ludo__RefundFailed();
+    }
+
+    function _removeFromPool(address[] storage pool, address player) internal {
+        for (uint256 i = 0; i < pool.length; i++) {
+            if (pool[i] == player) {
+                pool[i] = pool[pool.length - 1];
+                pool.pop();
+                inWaitingPool[player] = false;
+                return;
+            }
+        }
+        revert Ludo__PlayerNotInGame();
+    }
+
     // ========== VIEW HELPERS ==========
 
     /// note: Refactor the block.timestamp
