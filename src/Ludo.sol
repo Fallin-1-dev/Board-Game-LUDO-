@@ -38,6 +38,7 @@ contract Ludo {
     error Ludo__NotInAnyStakePool();
     error Ludo__GameNotFound();
     error Ludo__PoolFull();
+    error Ludo__ReentrantCall();
 
     // ========== ENUMS ==========
     enum StakeTier {
@@ -51,7 +52,8 @@ contract Ludo {
     }
     // ========== STATE VARIABLES ==========
     address[] public players;
-    uint256 public poolStartTime;
+    bool private _locked;
+    mapping(StakeTier => uint256) public poolStartTimes;
 
     // ========== CONSTANTS ==========
     uint8 public constant MAX_PLAYERS = 4;
@@ -59,11 +61,19 @@ contract Ludo {
     uint256 public constant MAX_STAKE = 5 ether;
     uint256 public constant START_DELAY = 5; // seconds before game starts
 
+    // ========== MODIFIERS ==========
+    modifier nonReentrant() {
+        if (_locked) revert Ludo__ReentrantCall();
+        _locked = true;
+        _;
+        _locked = false;
+    }
+
     // ========== MAPPINGS ==========
 
-    mapping(StakeTier => uint256) public tierStakes; // gameId => Game
-    mapping(StakeTier => address[]) public waitingPools; // stake => waiting players
-    mapping(address => bool) public inWaitingPool; // player => is waiting
+    mapping(StakeTier => uint256) public tierStakes;
+    mapping(StakeTier => address[]) public waitingPools;
+    mapping(address => bool) public inWaitingPool;
 
     // ========== EVENTS ==========
     event PlayerJoined(address indexed player, uint256 stake);
@@ -79,8 +89,6 @@ contract Ludo {
         tierStakes[StakeTier.Heavy] = 1 ether;
         tierStakes[StakeTier.Giant] = 3 ether;
         tierStakes[StakeTier.Boss] = 5 ether;
-
-        poolStartTime = block.timestamp;
     }
 
     function getStakeValue(StakeTier tier) public view returns (uint256) {
@@ -89,7 +97,7 @@ contract Ludo {
 
     // ========== JOIN GAME LOGIC ==========
 
-    function joinGame(StakeTier tier) external payable {
+    function joinGame(StakeTier tier) external payable nonReentrant {
         if (inWaitingPool[msg.sender]) revert Ludo__AlreadyInGameOrWaiting();
 
         if (waitingPools[tier].length >= MAX_PLAYERS) revert Ludo__PoolFull();
@@ -101,7 +109,7 @@ contract Ludo {
         inWaitingPool[msg.sender] = true;
 
         if (waitingPools[tier].length == 1) {
-            poolStartTime = block.timestamp;
+            poolStartTimes[tier] = block.timestamp;
         }
         emit PlayerJoined(msg.sender, stake);
 
@@ -112,48 +120,63 @@ contract Ludo {
 
     // ========== LEAVE GAME OR POOL ==========
 
-    function leaveGame(StakeTier tier) external {
+    function leaveGame(StakeTier tier) external nonReentrant {
         if (!inWaitingPool[msg.sender]) revert Ludo__NotInWaitingPool();
 
         address[] storage pool = waitingPools[tier];
-        require(pool.length > 1, "Cannot leave pool with only 1 player");
+        uint256 refundAmount = tierStakes[tier];
+        bool found = false;
 
         for (uint256 i = 0; i < pool.length; i++) {
             if (pool[i] == msg.sender) {
                 pool[i] = pool[pool.length - 1];
                 pool.pop();
-                inWaitingPool[msg.sender] = false;
-
-                (bool success,) = msg.sender.call{value: tierStakes[tier]}("");
-                if (!success) revert Ludo__RefundFailed();
-
-                emit PlayerLeft(msg.sender, tierStakes[tier], true);
-                return;
+                found = true;
+                break;
             }
         }
 
-        revert Ludo__PlayerNotInGame();
+        if (!found) revert Ludo__PlayerNotInGame();
+
+        inWaitingPool[msg.sender] = false;
+
+        if (pool.length == 0) {
+            poolStartTimes[tier] = 0;
+        }
+
+        (bool success,) = msg.sender.call{value: refundAmount}("");
+        if (!success) revert Ludo__RefundFailed();
+
+        emit PlayerLeft(msg.sender, refundAmount, true);
     }
 
     // ========== CLEANUP STALEPOOLS ==========
-    function cleanupStalePool(StakeTier tier) external {
+    function cleanupStalePool(StakeTier tier) external nonReentrant {
         address[] storage pool = waitingPools[tier];
-        uint256 start = poolStartTime;
+        uint256 start = poolStartTimes[tier];
 
         if (pool.length == 0) return;
         if (block.timestamp < start + 10 minutes) return;
 
-        for (uint256 i = 0; i < pool.length; i++) {
-            address player = pool[i];
-            inWaitingPool[player] = false;
-            (bool success,) = player.call{value: getStakeValue(tier)}("");
-            if (!success) revert Ludo__RefundFailed();
-
-            emit PlayerLeft(player, getStakeValue(tier), true);
+        uint256 refundAmount = getStakeValue(tier);
+        uint256 poolLen = pool.length;
+        address[] memory playersToRefund = new address[](poolLen);
+        for (uint256 i = 0; i < poolLen; i++) {
+            playersToRefund[i] = pool[i];
+            inWaitingPool[pool[i]] = false;
         }
 
         delete waitingPools[tier];
-        poolStartTime = 0;
+        poolStartTimes[tier] = 0;
+
+        for (uint256 i = 0; i < poolLen; i++) {
+            (bool success,) = playersToRefund[i].call{value: refundAmount}("");
+            if (success) {
+                emit PlayerLeft(playersToRefund[i], refundAmount, true);
+            } else {
+                emit PlayerLeft(playersToRefund[i], refundAmount, false);
+            }
+        }
     }
 
     // ========== VIEW HELPERS ==========
