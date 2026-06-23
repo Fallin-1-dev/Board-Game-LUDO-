@@ -123,21 +123,10 @@ contract Ludo {
 
         address[] storage pool = waitingPools[tier];
 
-        for (uint256 i = 0; i < pool.length; i++) {
-            if (pool[i] == msg.sender) {
-                pool[i] = pool[pool.length - 1];
-                pool.pop();
-                inWaitingPool[msg.sender] = false;
-
-                (bool success,) = msg.sender.call{value: tierStakes[tier]}("");
-                if (!success) revert Ludo__RefundFailed();
-
-                emit PlayerLeft(msg.sender, tierStakes[tier], true);
-                return;
-            }
-        }
-
-        revert Ludo__PlayerNotInGame();
+        _removeFromPool(pool, msg.sender);
+        uint256 stake = tierStakes[tier];
+        _refundPlayer(msg.sender, stake);
+        emit PlayerLeft(msg.sender, stake, true);
     }
 
     // ========== CLEANUP STALEPOOLS ==========
@@ -163,6 +152,25 @@ contract Ludo {
 
         delete waitingPools[tier];
         poolStartTimes[tier] = 0;
+    }
+
+    // ========== INTERNAL UTILITIES ==========
+
+    function _refundPlayer(address player, uint256 amount) internal {
+        (bool success,) = player.call{value: amount}("");
+        if (!success) revert Ludo__RefundFailed();
+    }
+
+    function _removeFromPool(address[] storage pool, address player) internal {
+        for (uint256 i = 0; i < pool.length; i++) {
+            if (pool[i] == player) {
+                pool[i] = pool[pool.length - 1];
+                pool.pop();
+                inWaitingPool[player] = false;
+                return;
+            }
+        }
+        revert Ludo__PlayerNotInGame();
     }
 
     // ========== VIEW HELPERS ==========

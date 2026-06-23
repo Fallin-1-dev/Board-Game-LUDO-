@@ -9,13 +9,16 @@ contract TestLudoHelper is Script {
     uint256 public constant STARTING_BALANCE = 10 ether;
     uint256 public constant NUM_PLAYERS = 4;
 
-    // Creates and labels new unique addresses
-
-    function generatePlayers() public {
-        for (uint256 i = 0; i < 8; i++) {
-            address newPlayer = address(uint160(uint256(keccak256(abi.encodePacked(i, block.timestamp)))));
+    function generatePlayers() public returns (address[] memory) {
+        for (uint256 i = 0; i < NUM_PLAYERS; i++) {
+            address newPlayer = _generateAddress(i);
             Players.push(newPlayer);
         }
+        return Players;
+    }
+
+    function _generateAddress(uint256 seed) internal view returns (address) {
+        return address(uint160(uint256(keccak256(abi.encodePacked(seed, block.timestamp)))));
     }
 
     function getPlayers() external view returns (address[] memory) {
