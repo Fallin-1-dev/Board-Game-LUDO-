@@ -42,6 +42,7 @@ contract Ludo {
     error Ludo__PoolNotStale();
     error Ludo__WrongTier();
     error Ludo__PartialRefundFailure(address player, uint256 amount);
+    error Ludo__ReentrantCall();
 
     // ========== ENUMS ==========
     enum StakeTier {
@@ -55,12 +56,21 @@ contract Ludo {
     }
     // ========== STATE VARIABLES ==========
     address[] public players;
+    bool private _locked;
 
     // ========== CONSTANTS ==========
     uint8 public constant MAX_PLAYERS = 4;
     uint256 public constant MIN_STAKE = 0.1 ether;
     uint256 public constant MAX_STAKE = 5 ether;
     uint256 public constant START_DELAY = 5; // seconds before game starts
+
+    // ========== MODIFIERS ==========
+    modifier nonReentrant() {
+        if (_locked) revert Ludo__ReentrantCall();
+        _locked = true;
+        _;
+        _locked = false;
+    }
 
     // ========== MAPPINGS ==========
 
@@ -93,7 +103,7 @@ contract Ludo {
 
     // ========== JOIN GAME LOGIC ==========
 
-    function joinGame(StakeTier tier) external payable {
+    function joinGame(StakeTier tier) external payable nonReentrant {
         if (inWaitingPool[msg.sender]) revert Ludo__AlreadyInGameOrWaiting();
 
         if (waitingPools[tier].length >= MAX_PLAYERS) revert Ludo__PoolFull();
@@ -117,20 +127,39 @@ contract Ludo {
 
     // ========== LEAVE GAME OR POOL ==========
 
-    function leaveGame(StakeTier tier) external {
+    function leaveGame(StakeTier tier) external nonReentrant {
         if (!inWaitingPool[msg.sender]) revert Ludo__NotInWaitingPool();
         if (playerTier[msg.sender] != tier) revert Ludo__WrongTier();
 
         address[] storage pool = waitingPools[tier];
+        uint256 refundAmount = tierStakes[tier];
+        bool found = false;
 
-        _removeFromPool(pool, msg.sender);
-        uint256 stake = tierStakes[tier];
-        _refundPlayer(msg.sender, stake);
-        emit PlayerLeft(msg.sender, stake, true);
+        for (uint256 i = 0; i < pool.length; i++) {
+            if (pool[i] == msg.sender) {
+                pool[i] = pool[pool.length - 1];
+                pool.pop();
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) revert Ludo__PlayerNotInGame();
+
+        inWaitingPool[msg.sender] = false;
+
+        if (pool.length == 0) {
+            poolStartTimes[tier] = 0;
+        }
+
+        (bool success,) = msg.sender.call{value: refundAmount}("");
+        if (!success) revert Ludo__RefundFailed();
+
+        emit PlayerLeft(msg.sender, refundAmount, true);
     }
 
     // ========== CLEANUP STALEPOOLS ==========
-    function cleanupStalePool(StakeTier tier) external {
+    function cleanupStalePool(StakeTier tier) external nonReentrant {
         address[] storage pool = waitingPools[tier];
         uint256 start = poolStartTimes[tier];
 
@@ -138,20 +167,24 @@ contract Ludo {
         if (block.timestamp < start + 10 minutes) revert Ludo__PoolNotStale();
 
         uint256 stakeAmount = getStakeValue(tier);
-
-        for (uint256 i = 0; i < pool.length; i++) {
-            address player = pool[i];
-            inWaitingPool[player] = false;
-            (bool success,) = player.call{value: stakeAmount}("");
-            if (!success) {
-                emit RefundFailed(player, stakeAmount);
-            } else {
-                emit PlayerLeft(player, stakeAmount, true);
-            }
+        uint256 poolLen = pool.length;
+        address[] memory playersToRefund = new address[](poolLen);
+        for (uint256 i = 0; i < poolLen; i++) {
+            playersToRefund[i] = pool[i];
+            inWaitingPool[pool[i]] = false;
         }
 
         delete waitingPools[tier];
         poolStartTimes[tier] = 0;
+
+        for (uint256 i = 0; i < poolLen; i++) {
+            (bool success,) = playersToRefund[i].call{value: stakeAmount}("");
+            if (success) {
+                emit PlayerLeft(playersToRefund[i], stakeAmount, true);
+            } else {
+                emit RefundFailed(playersToRefund[i], stakeAmount);
+            }
+        }
     }
 
     // ========== INTERNAL UTILITIES ==========
