@@ -38,6 +38,10 @@ contract Ludo {
     error Ludo__NotInAnyStakePool();
     error Ludo__GameNotFound();
     error Ludo__PoolFull();
+    error Ludo__PoolEmpty();
+    error Ludo__PoolNotStale();
+    error Ludo__WrongTier();
+    error Ludo__PartialRefundFailure(address player, uint256 amount);
 
     // ========== ENUMS ==========
     enum StakeTier {
@@ -51,7 +55,6 @@ contract Ludo {
     }
     // ========== STATE VARIABLES ==========
     address[] public players;
-    uint256 public poolStartTime;
 
     // ========== CONSTANTS ==========
     uint8 public constant MAX_PLAYERS = 4;
@@ -61,14 +64,17 @@ contract Ludo {
 
     // ========== MAPPINGS ==========
 
-    mapping(StakeTier => uint256) public tierStakes; // gameId => Game
-    mapping(StakeTier => address[]) public waitingPools; // stake => waiting players
+    mapping(StakeTier => uint256) public tierStakes; // tier => stake amount
+    mapping(StakeTier => address[]) public waitingPools; // tier => waiting players
     mapping(address => bool) public inWaitingPool; // player => is waiting
+    mapping(address => StakeTier) public playerTier; // player => tier they joined
+    mapping(StakeTier => uint256) public poolStartTimes; // tier => pool start time
 
     // ========== EVENTS ==========
     event PlayerJoined(address indexed player, uint256 stake);
     event PlayerLeft(address indexed player, uint256 stake, bool refunded);
     event PoolLocked(StakeTier tier);
+    event RefundFailed(address indexed player, uint256 amount);
 
     // ========== CONSTRUCTOR ==========
     constructor() {
@@ -79,8 +85,6 @@ contract Ludo {
         tierStakes[StakeTier.Heavy] = 1 ether;
         tierStakes[StakeTier.Giant] = 3 ether;
         tierStakes[StakeTier.Boss] = 5 ether;
-
-        poolStartTime = block.timestamp;
     }
 
     function getStakeValue(StakeTier tier) public view returns (uint256) {
@@ -99,9 +103,10 @@ contract Ludo {
 
         waitingPools[tier].push(msg.sender);
         inWaitingPool[msg.sender] = true;
+        playerTier[msg.sender] = tier;
 
         if (waitingPools[tier].length == 1) {
-            poolStartTime = block.timestamp;
+            poolStartTimes[tier] = block.timestamp;
         }
         emit PlayerJoined(msg.sender, stake);
 
@@ -114,9 +119,9 @@ contract Ludo {
 
     function leaveGame(StakeTier tier) external {
         if (!inWaitingPool[msg.sender]) revert Ludo__NotInWaitingPool();
+        if (playerTier[msg.sender] != tier) revert Ludo__WrongTier();
 
         address[] storage pool = waitingPools[tier];
-        require(pool.length > 1, "Cannot leave pool with only 1 player");
 
         for (uint256 i = 0; i < pool.length; i++) {
             if (pool[i] == msg.sender) {
@@ -138,22 +143,26 @@ contract Ludo {
     // ========== CLEANUP STALEPOOLS ==========
     function cleanupStalePool(StakeTier tier) external {
         address[] storage pool = waitingPools[tier];
-        uint256 start = poolStartTime;
+        uint256 start = poolStartTimes[tier];
 
-        if (pool.length == 0) return;
-        if (block.timestamp < start + 10 minutes) return;
+        if (pool.length == 0) revert Ludo__PoolEmpty();
+        if (block.timestamp < start + 10 minutes) revert Ludo__PoolNotStale();
+
+        uint256 stakeAmount = getStakeValue(tier);
 
         for (uint256 i = 0; i < pool.length; i++) {
             address player = pool[i];
             inWaitingPool[player] = false;
-            (bool success,) = player.call{value: getStakeValue(tier)}("");
-            if (!success) revert Ludo__RefundFailed();
-
-            emit PlayerLeft(player, getStakeValue(tier), true);
+            (bool success,) = player.call{value: stakeAmount}("");
+            if (!success) {
+                emit RefundFailed(player, stakeAmount);
+            } else {
+                emit PlayerLeft(player, stakeAmount, true);
+            }
         }
 
         delete waitingPools[tier];
-        poolStartTime = 0;
+        poolStartTimes[tier] = 0;
     }
 
     // ========== VIEW HELPERS ==========
